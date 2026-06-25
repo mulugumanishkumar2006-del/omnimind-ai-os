@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  omnimind_os:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - backend_data:/app/chroma_db
+      - .:/app
+    environment:
+      - DATABASE_URL=sqlite:////app/chroma_db/omnimind.db
+      - SIMULATION_MODE=True
+    restart: always
+
+volumes:
+  backend_data:
