@@ -7,13 +7,13 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     
     # Database
-    DATABASE_URL: str = "sqlite:///./omnimind.db"
+    DATABASE_URL: str = "sqlite:////tmp/omnimind.db" if os.getenv("VERCEL") else "sqlite:///./omnimind.db"
     
     # Redis Cache
     REDIS_URL: Optional[str] = None
     
     # ChromaDB
-    CHROMA_DB_DIR: str = "./chroma_db"
+    CHROMA_DB_DIR: str = "/tmp/chroma_db" if os.getenv("VERCEL") else "./chroma_db"
     
     # API Keys
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY", "")
