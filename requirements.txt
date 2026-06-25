@@ -1,9 +1,7 @@
 fastapi>=0.100.0
 uvicorn>=0.22.0
-streamlit>=1.30.0
 pydantic>=2.0
 SQLAlchemy>=2.0
-sentence-transformers>=2.2.0
 numpy>=1.20.0
 networkx>=3.0
 plotly>=5.0
