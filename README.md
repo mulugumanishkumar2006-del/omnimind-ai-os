@@ -1,6 +1,5 @@
 # OmniMind AI OS — AI Operating System
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![CI](https://img.shields.io/badge/CI-pending-lightgrey)](#)
 
 OmniMind AI OS is a production-ready AI Operating System that provides unified memory, multi-agent orchestration, RAG, a prompt studio, and observability for building reliable LLM-based applications.
 
