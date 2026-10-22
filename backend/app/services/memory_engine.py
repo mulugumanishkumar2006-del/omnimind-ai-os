@@ -76,25 +76,50 @@ async def add_memory(
     return db_memory
 
 def search_memories(query: str, db: Session, limit: int = 5) -> List[Dict[str, Any]]:
-    """Hybrid semantic search: search vector store, then map results back to database records."""
-    vector_results = query_documents("memories", query, n_results=limit)
-    
+    """Hybrid semantic search: search vector store, then map results back to database records, with keyword fallback."""
     results = []
-    for vr in vector_results:
-        mem_id = vr["id"]
-        # Fetch detailed database record
-        db_mem = db.query(MemoryDB).filter(MemoryDB.id == mem_id).first()
-        if db_mem:
-            results.append({
-                "id": db_mem.id,
-                "content": db_mem.content,
-                "type": db_mem.type,
-                "importance_score": db_mem.importance_score,
-                "created_at": db_mem.created_at,
-                "similarity": vr.get("similarity", 1.0),
-                "metadata": db_mem.metadata_json
-            })
-            
+    seen_ids = set()
+
+    try:
+        vector_results = query_documents("memories", query, n_results=limit)
+        for vr in vector_results:
+            mem_id = vr["id"]
+            db_mem = db.query(MemoryDB).filter(MemoryDB.id == mem_id).first()
+            if db_mem and db_mem.id not in seen_ids:
+                seen_ids.add(db_mem.id)
+                results.append({
+                    "id": db_mem.id,
+                    "content": db_mem.content,
+                    "type": db_mem.type,
+                    "importance_score": db_mem.importance_score,
+                    "created_at": db_mem.created_at,
+                    "similarity": vr.get("similarity", 1.0),
+                    "metadata": db_mem.metadata_json
+                })
+    except Exception as e:
+        logger.error("Vector search query error in search_memories: %s", str(e))
+
+    # Keyword fallback if vector search yielded fewer results than limit
+    if len(results) < limit:
+        remaining = limit - len(results)
+        kw_matches = db.query(MemoryDB).filter(
+            MemoryDB.content.ilike(f"%{query}%")
+        ).limit(remaining * 2).all()
+        for kw_mem in kw_matches:
+            if kw_mem.id not in seen_ids:
+                seen_ids.add(kw_mem.id)
+                results.append({
+                    "id": kw_mem.id,
+                    "content": kw_mem.content,
+                    "type": kw_mem.type,
+                    "importance_score": kw_mem.importance_score,
+                    "created_at": kw_mem.created_at,
+                    "similarity": 0.75,
+                    "metadata": kw_mem.metadata_json
+                })
+                if len(results) >= limit:
+                    break
+
     return results
 
 def get_memory_timeline(db: Session, memory_type: Optional[str] = None, limit: int = 50) -> List[MemoryDB]:

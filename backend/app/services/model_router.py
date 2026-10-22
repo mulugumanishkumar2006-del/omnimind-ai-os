@@ -27,7 +27,14 @@ def analyze_complexity(prompt_text: str) -> str:
     return "low"
 
 def route_request(complexity: str) -> tuple[str, str]:
-    """Determine provider and model based on query complexity."""
+    """Determine provider and model based on query complexity or environment overrides."""
+    # Check if user specified a default provider via environment variable
+    if settings.DEFAULT_LLM_PROVIDER:
+        provider = settings.DEFAULT_LLM_PROVIDER.lower()
+        default_model = TOKEN_PRICING.get(provider, {}).get("default_model", "default")
+        model = settings.DEFAULT_LLM_MODEL or default_model
+        return provider, model
+
     if complexity == "high":
         # Route to more capable models
         if settings.CLAUDE_API_KEY:
@@ -55,7 +62,7 @@ async def execute_llm_call(
     db: Session,
     complexity_override: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Execute LLM call via routed provider, tracking costs, latency and saving logs."""
+    """Execute LLM call via routed provider, tracking costs, latency, simulation status, and saving logs."""
     complexity = complexity_override or analyze_complexity(prompt_text)
     provider, model = route_request(complexity)
     
@@ -65,6 +72,7 @@ async def execute_llm_call(
     input_tokens = len(prompt_text) // 4  # Rough heuristic
     output_tokens = 0
     cost = 0.0
+    is_simulated = False
     
     # 1. Real API execution check
     has_key = {
@@ -78,26 +86,34 @@ async def execute_llm_call(
     if has_key and not settings.SIMULATION_MODE:
         try:
             output_text, input_tokens, output_tokens = await _call_real_provider(provider, model, prompt_text)
+            is_simulated = False
         except Exception as e:
             logger.error("Real LLM call failed, reverting to simulation: %s", str(e))
             success = False
+            is_simulated = True
             output_text = _generate_simulated_response(prompt_name, prompt_text)
             output_tokens = len(output_text) // 4
     else:
         # Simulation Mode
+        is_simulated = True
         output_text = _generate_simulated_response(prompt_name, prompt_text)
         output_tokens = len(output_text) // 4
     
     latency = time.time() - start_time
     
-    # Calculate pricing
-    rates = TOKEN_PRICING.get(provider, {"input": 0.0, "output": 0.0})
-    cost = ((input_tokens / 1000) * rates["input"]) + ((output_tokens / 1000) * rates["output"])
+    # Calculate pricing (0 for simulated calls)
+    if not is_simulated:
+        rates = TOKEN_PRICING.get(provider, {"input": 0.0, "output": 0.0})
+        cost = ((input_tokens / 1000) * rates["input"]) + ((output_tokens / 1000) * rates["output"])
+    else:
+        cost = 0.0
+
+    logged_provider = f"{provider} (simulated)" if is_simulated else provider
     
     # Log to DB
     log_entry = ModelRouteLogDB(
         prompt_name=prompt_name,
-        provider=provider,
+        provider=logged_provider[:50],
         model_name=model,
         complexity=complexity,
         cost=cost,
@@ -110,12 +126,13 @@ async def execute_llm_call(
     
     return {
         "output": output_text,
-        "provider": provider,
+        "provider": logged_provider,
         "model": model,
         "cost": cost,
         "latency": latency,
         "tokens": input_tokens + output_tokens,
-        "success": success
+        "success": success,
+        "is_simulated": is_simulated
     }
 
 async def _call_real_provider(provider: str, model: str, prompt: str) -> tuple[str, int, int]:

@@ -36,7 +36,7 @@ class TaskCreate(TaskBase):
 class TaskResponse(TaskBase):
     id: str
     created_at: datetime
-    subtasks: List['TaskResponse'] = []
+    subtasks: List['TaskResponse'] = Field(default_factory=list)
 
     class Config:
         from_attributes = True

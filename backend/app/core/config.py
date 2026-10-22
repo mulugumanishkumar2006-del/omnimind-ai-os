@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     CLAUDE_API_KEY: Optional[str] = os.getenv("CLAUDE_API_KEY", "")
     DEEPSEEK_API_KEY: Optional[str] = os.getenv("DEEPSEEK_API_KEY", "")
     
+    # Model configuration
+    DEFAULT_LLM_PROVIDER: Optional[str] = os.getenv("DEFAULT_LLM_PROVIDER", None)
+    DEFAULT_LLM_MODEL: Optional[str] = os.getenv("DEFAULT_LLM_MODEL", None)
+    
     # Embedding config
     EMBEDDING_MODEL_NAME: str = "all-MiniLM-L6-v2"
     

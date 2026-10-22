@@ -4,7 +4,7 @@ import streamlit as st
 import streamlit.components.v1 as html_comp
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Common headers for backend API requests
 HEADERS = {"Content-Type": "application/json"}
@@ -170,7 +170,7 @@ def render_graph_viewer(api_base: str):
     with col1:
         st.subheader("Interactive Visualization")
         # Embedding the VisJS HTML view from FastAPI
-        iframe_src = f"http://localhost:8000/api/v1/knowledge/view"
+        iframe_src = f"{api_base}/knowledge/view"
         html_comp.iframe(iframe_src, height=500, scrolling=False)
         
     with col2:
