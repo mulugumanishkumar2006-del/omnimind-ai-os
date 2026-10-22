@@ -88,6 +88,7 @@ async def run_tests():
         
     except Exception as e:
         logger.error("System Verification Failure: %s", str(e), exc_info=True)
+        raise
     finally:
         db.close()
 

@@ -12,9 +12,9 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application source
+# Copy application source (backend and static HTML/JS frontend assets)
 COPY backend/ ./backend/
-COPY requirements.txt .
+COPY frontend/ ./frontend/
 
 EXPOSE 8000
 

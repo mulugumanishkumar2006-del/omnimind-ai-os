@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 # Base URL for backend FastAPI service
-BACKEND_URL = os.getenv("API_BASE_URL", "http://localhost:8000/api/v1")
+BACKEND_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000/api/v1")
 
 # Load Custom CSS stylesheet
 css_path = os.path.join(os.path.dirname(__file__), "assets", "custom.css")

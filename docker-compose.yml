@@ -1,19 +1,47 @@
-version: '3.8'
 
 services:
-  omnimind_os:
+  backend:
     build:
       context: .
       dockerfile: Dockerfile.backend
+    container_name: omnimind_backend
     ports:
       - "8000:8000"
     volumes:
-      - backend_data:/app/chroma_db
-      - .:/app
+      - omnimind_data:/app/data
     environment:
-      - DATABASE_URL=sqlite:////app/chroma_db/omnimind.db
-      - SIMULATION_MODE=True
-    restart: always
+      - DATABASE_URL=sqlite:////app/data/omnimind.db
+      - CHROMA_DB_DIR=/app/data/chroma_db
+      - SIMULATION_MODE=${SIMULATION_MODE:-True}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: omnimind_frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - API_BASE_URL=http://backend:8000/api/v1
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
-  backend_data:
+  omnimind_data:
