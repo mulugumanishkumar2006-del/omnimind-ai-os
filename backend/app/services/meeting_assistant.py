@@ -15,7 +15,12 @@ async def process_meeting_transcript(
     transcript: str,
     db: Session
 ) -> MeetingDB:
-    """Analyze a transcript, extract summary/actions/decisions, and spawn action items as system tasks."""
+    if not title or not title.strip():
+        raise ValueError("Meeting title cannot be empty or whitespace.")
+    if not transcript or not transcript.strip():
+        raise ValueError("Meeting transcript cannot be empty or whitespace.")
+    title = title.strip()
+    transcript = transcript.strip()
     prompt = f"""Analyze the meeting transcript below and extract:
 1. A concise meeting summary.
 2. A list of key decisions made.
@@ -82,7 +87,19 @@ Transcript:
     for item in action_items:
         t_title = f"[{item.get('assignee', 'Unassigned')}] {item.get('title')}"
         t_desc = f"Action item from meeting '{title}'. Assigned to {item.get('assignee', 'Unassigned')}.\n\nDescription: {item.get('description', '')}"
-        days = int(item.get("days_to_complete", 5))
+        raw_days = item.get("days_to_complete", 5)
+        try:
+            if isinstance(raw_days, (int, float)):
+                days = max(1, int(raw_days))
+            elif isinstance(raw_days, str):
+                import re
+                digits = re.findall(r"\d+", raw_days)
+                days = max(1, int(digits[0])) if digits else 5
+            else:
+                days = 5
+        except Exception:
+            days = 5
+            
         deadline = datetime.now() + timedelta(days=days)
         
         try:

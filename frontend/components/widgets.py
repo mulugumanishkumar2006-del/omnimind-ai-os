@@ -90,52 +90,77 @@ def render_memory_vault(api_base: str):
 def render_task_workspace(api_base: str):
     st.header("📋 Task Intelligence System")
     
-    # 1. Create Goals / Tasks
-    with st.expander("➕ Define Goal or Project", expanded=False):
-        with st.form("create_task_form"):
-            title = st.text_input("Title")
-            desc = st.text_area("Description")
-            t_type = st.selectbox("Category", ["goal", "project", "task", "learning_plan"])
-            est_hours = st.number_input("Estimate (hours)", min_value=0.0, value=2.0)
-            deadline = st.date_input("Deadline", datetime.now() + timedelta(days=7))
-            submitted = st.form_submit_button("Launch Goal")
-            
-            if submitted and title:
-                deadline_str = datetime.combine(deadline, datetime.min.time()).isoformat()
-                payload = {
-                    "title": title,
-                    "description": desc,
-                    "type": t_type,
-                    "estimated_hours": est_hours,
-                    "deadline": deadline_str,
-                    "progress": 0.0,
-                    "status": "pending"
-                }
-                res = api_post(f"{api_base}/tasks/", payload)
-                if res:
-                    st.success(f"Task '{title}' initialized.")
-                    st.rerun()
+    col_a, col_b = st.columns(2)
+    with col_a:
+        # 1. High-level Objective to Plan Generator
+        with st.expander("⚡ Objective-to-Plan Generator", expanded=True):
+            with st.form("objective_plan_form"):
+                objective_text = st.text_input("High-Level Objective", placeholder="e.g. Create a study plan for learning Python basics over seven days.")
+                plan_days = st.number_input("Target Duration (Days)", min_value=1, max_value=90, value=7)
+                plan_cat = st.selectbox("Plan Category", ["learning_plan", "project", "goal"])
+                submit_plan = st.form_submit_button("Generate Structured Plan")
+                
+                if submit_plan and objective_text:
+                    with st.spinner("Decomposing objective into structured milestones..."):
+                        res = api_post(f"{api_base}/tasks/plan", {
+                            "objective": objective_text,
+                            "target_days": int(plan_days),
+                            "category": plan_cat
+                        })
+                        if res:
+                            st.success(f"Generated plan with {res.get('total_subtasks', 0)} actionable milestones!")
+                            st.rerun()
 
-    # 2. Render Hierarchy
+    with col_b:
+        # 2. Manual Goal / Task Definition
+        with st.expander("➕ Define Custom Task / Goal", expanded=False):
+            with st.form("create_task_form"):
+                title = st.text_input("Title")
+                desc = st.text_area("Description")
+                t_type = st.selectbox("Category", ["goal", "project", "task", "learning_plan"])
+                est_hours = st.number_input("Estimate (hours)", min_value=0.0, value=2.0)
+                deadline = st.date_input("Deadline", datetime.now() + timedelta(days=7))
+                submitted = st.form_submit_button("Create Task")
+                
+                if submitted and title:
+                    deadline_str = datetime.combine(deadline, datetime.min.time()).isoformat()
+                    payload = {
+                        "title": title,
+                        "description": desc,
+                        "type": t_type,
+                        "estimated_hours": est_hours,
+                        "deadline": deadline_str,
+                        "progress": 0.0,
+                        "status": "pending"
+                    }
+                    res = api_post(f"{api_base}/tasks/", payload)
+                    if res:
+                        st.success(f"Task '{title}' initialized.")
+                        st.rerun()
+
+    # 3. Render Hierarchy
     st.subheader("Hierarchy Tree")
     tasks = api_get(f"{api_base}/tasks/")
     
     if tasks:
         for t in tasks:
-            col1, col2, col3 = st.columns([4, 2, 2])
+            col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
             with col1:
                 st.markdown(f"**{t['title']}** ({t['type'].replace('_', ' ').title()})")
                 st.caption(t["description"] or "No description")
             with col2:
-                # Progress Bar
                 st.progress(t["progress"] / 100.0)
-                st.caption(f"Progress: {t['progress']}%")
+                st.caption(f"Progress: {t['progress']}% | Est: {t.get('estimated_hours', 0)}h")
             with col3:
                 status_color = {"pending": "🔵", "in_progress": "🟡", "completed": "🟢", "blocked": "🔴"}.get(t["status"], "⚪")
                 st.write(f"{status_color} {t['status'].replace('_', ' ').title()}")
+            with col4:
+                if st.button("Delete", key=f"del_{t['id']}"):
+                    requests.delete(f"{api_base}/tasks/{t['id']}")
+                    st.rerun()
                 
-            # Breakdown Goal Trigger
-            if t["type"] == "goal" and not t["subtasks"]:
+            # Breakdown Goal Trigger if has no subtasks
+            if t["type"] in ("goal", "learning_plan") and not t.get("subtasks"):
                 if st.button("AI Subtask Breakdown", key=f"bd_{t['id']}"):
                     with st.spinner("Analyzing and decomposing goal..."):
                         res = api_post(f"{api_base}/tasks/{t['id']}/breakdown", {})
@@ -144,22 +169,24 @@ def render_task_workspace(api_base: str):
                             st.rerun()
                             
             # Render Subtasks if exist
-            if t["subtasks"]:
+            if t.get("subtasks"):
                 for sub in t["subtasks"]:
-                    st.markdown(f"""
-                    <div style='margin-left: 2rem; padding-left: 1rem; border-left: 1px dashed rgba(255,255,255,0.2);'>
-                        • <b>{sub['title']}</b> - {sub['status'].replace('_', ' ').title()} ({sub['progress']}%)
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Complete subtask button
-                    if sub["status"] != "completed":
-                        if st.button("Complete subtask", key=f"comp_{sub['id']}"):
-                            requests.put(f"{api_base}/tasks/{sub['id']}/progress?progress=100.0&status=completed")
-                            st.rerun()
+                    s_col1, s_col2 = st.columns([6, 2])
+                    with s_col1:
+                        st.markdown(f"""
+                        <div style='margin-left: 2rem; padding-left: 1rem; border-left: 1px dashed rgba(255,255,255,0.2);'>
+                            • <b>{sub['title']}</b> - {sub['status'].replace('_', ' ').title()} ({sub['progress']}%)
+                            <br><span style='font-size:0.8rem; color:#888;'>{sub.get('description', '')}</span>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    with s_col2:
+                        if sub["status"] != "completed":
+                            if st.button("Complete", key=f"comp_{sub['id']}"):
+                                requests.put(f"{api_base}/tasks/{sub['id']}/progress?progress=100.0&status=completed")
+                                st.rerun()
             st.divider()
     else:
-        st.info("No active tasks. Create a Goal above!")
+        st.info("No active tasks. Create a Goal or generate a Plan above!")
 
 # ==================== 3. KNOWLEDGE GRAPH ====================
 def render_graph_viewer(api_base: str):
@@ -169,7 +196,6 @@ def render_graph_viewer(api_base: str):
     
     with col1:
         st.subheader("Interactive Visualization")
-        # Embedding the VisJS HTML view from FastAPI
         iframe_src = f"{api_base}/knowledge/view"
         html_comp.iframe(iframe_src, height=500, scrolling=False)
         
@@ -194,50 +220,75 @@ def render_agent_viewer(api_base: str):
         st.subheader("Run Collaboration Agentic Pipeline")
         goal = st.text_input("Assign Goal / Task", placeholder="e.g. Build a Python caching script with Redis fallback.")
         
+        with st.expander("Execution Safeguards & Configuration", expanded=False):
+            max_steps_val = st.number_input("Max Allowed Steps", min_value=3, max_value=25, value=10)
+            max_retries_val = st.number_input("Max Retries Per Agent", min_value=0, max_value=5, value=2)
+        
         if st.button("Orchestrate Agents"):
             if goal:
-                steps_placeholder = st.empty()
-                with st.spinner("Running coordinating cascade..."):
-                    # We post the goal and simulate step notifications
-                    r = requests.post(f"{api_base}/agents/run", json={"goal": goal}, headers=HEADERS, timeout=30.0)
+                with st.spinner("Running coordinating cascade across agents..."):
+                    payload = {
+                        "goal": goal,
+                        "max_steps": int(max_steps_val),
+                        "max_retries": int(max_retries_val)
+                    }
+                    r = requests.post(f"{api_base}/agents/run", json=payload, headers=HEADERS, timeout=60.0)
                     if r.status_code == 200:
                         session = r.json()
-                        st.success("Goal processed successfully!")
+                        status_str = session.get("status", "unknown").upper()
+                        if status_str == "SUCCESS":
+                            st.success(f"Workflow finished successfully! Status: {status_str}")
+                        else:
+                            st.error(f"Workflow halted with issues! Status: {status_str}")
                         
-                        st.subheader("Agent Communication Log")
-                        for idx, step in enumerate(session["steps"]):
-                            agent_name = step["agent_name"]
-                            action = step["action"]
-                            msg = step["message"]
+                        st.subheader("Agent Communication & Execution Trace")
+                        for idx, step in enumerate(session.get("steps", [])):
+                            agent_name = step.get("agent_name", "Agent")
+                            role = step.get("agent_role", "")
+                            action = step.get("action", "")
+                            msg = step.get("message", "")
+                            step_st = step.get("status", "completed").upper()
+                            latency = step.get("latency", 0.0)
+                            prov = step.get("provider") or "system"
+                            is_sim = step.get("is_simulated", False)
+                            sim_badge = " [SIMULATED]" if is_sim else ""
+                            
+                            badge_color = "#10b981" if step_st == "COMPLETED" else ("#f59e0b" if step_st == "RETRYING" else "#ef4444")
                             
                             st.markdown(f"""
-                            <div style='background: rgba(255,255,255,0.02); padding: 1rem; border-radius: 8px; border-left: 4px solid #1E90FF; margin-bottom: 1rem;'>
-                                <b>[{idx+1}] {agent_name}</b> — <i>{action}</i><br>
-                                <span style='font-size: 0.9rem; color: #CCCCCC;'>{msg}</span>
+                            <div style='background: rgba(255,255,255,0.02); padding: 1rem; border-radius: 8px; border-left: 4px solid {badge_color}; margin-bottom: 1rem;'>
+                                <div style='display:flex; justify-content:space-between;'>
+                                    <b>[{idx+1}] {agent_name} ({role})</b> — <i>{action}</i>
+                                    <span style='color:{badge_color}; font-weight:600;'>[{step_st}]{sim_badge}</span>
+                                </div>
+                                <div style='font-size: 0.8rem; color: #888; margin-bottom: 0.5rem;'>
+                                    Provider: {prov} | Latency: {latency:.2f}s | Retries: {step.get('retry_count', 0)}
+                                </div>
+                                <p style='font-size: 0.9rem; color: #CCCCCC; white-space: pre-wrap;'>{msg}</p>
                             </div>
                             """, unsafe_allow_html=True)
                             
     with col2:
         st.subheader("Workflow Pipeline Architecture")
-        # Render a simple sequence diagram/workflow diagram
         st.markdown("""
         **Pipeline Flow:**
         ```
         Coordinator
-        └── Planner (Creates Tasks)
-            └── Researcher (Finds Context)
-                └── Coder (Generates Blocks)
-                    └── Reviewer (Validates Code)
-                        └── Security (Threat Scan)
-                            └── Analytics (Cost Audit)
+        └── Planner (Generates Roadmap)
+            └── Researcher (Retrieves Project Knowledge)
+                └── Coder (Generates Proposed Blocks)
+                    └── Reviewer (Validates & Identifies Defects)
+                        └── Security (Vulnerability Scan)
+                            └── Analytics (Cost & Metric Audit)
         ```
         """)
         
         sessions = api_get(f"{api_base}/agents/sessions")
         if sessions:
             st.subheader("Session History")
-            for s in sessions[:5]:
-                st.caption(f"Goal: {s['goal'][:40]}... | Status: {s['status']}")
+            for s in sessions[:6]:
+                st_color = "🟢" if s.get("status") == "success" else "🔴"
+                st.caption(f"{st_color} **{s['goal'][:35]}...** | Status: {s.get('status')} | Steps: {len(s.get('steps', []))}")
 
 # ==================== 5. PROMPT STUDIO ====================
 def render_prompt_studio(api_base: str):

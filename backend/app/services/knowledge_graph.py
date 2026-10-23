@@ -45,37 +45,40 @@ Example Response:
         edges = data.get("edges", [])
         
         # Save Nodes
+        seen_node_ids = set()
         for n in nodes:
             node_id = n.get("id", "").strip().lower()
-            label = n.get("label", "")
+            label = n.get("label", "").strip()
             node_type = n.get("type", "Concept")
             if not node_id or not label:
                 continue
                 
-            # Upsert node
-            existing_node = db.query(GraphNodeDB).filter(GraphNodeDB.id == node_id).first()
-            if not existing_node:
-                db_node = GraphNodeDB(
-                    id=node_id,
-                    label=label,
-                    type=node_type,
-                    properties=n.get("properties", {})
-                )
-                db.add(db_node)
-            
-            # Always return the nodes identified in the text
-            extracted_data["nodes"].append({"id": node_id, "label": label, "type": node_type})
+            if node_id not in seen_node_ids:
+                seen_node_ids.add(node_id)
+                # Upsert node
+                existing_node = db.query(GraphNodeDB).filter(GraphNodeDB.id == node_id).first()
+                if not existing_node:
+                    db_node = GraphNodeDB(
+                        id=node_id,
+                        label=label,
+                        type=node_type,
+                        properties=n.get("properties", {})
+                    )
+                    db.add(db_node)
+                
+                extracted_data["nodes"].append({"id": node_id, "label": label, "type": node_type})
                 
         db.commit()
         
         # Save Edges
+        seen_edge_keys = set()
         for e in edges:
             src = e.get("source_id", "").strip().lower()
             tgt = e.get("target_id", "").strip().lower()
-            rel = e.get("relation", "connects_to")
+            rel = e.get("relation", "connects_to").strip()
             wt = float(e.get("weight", 1.0))
             
-            if not src or not tgt:
+            if not src or not tgt or src == tgt:
                 continue
                 
             # Verify nodes exist (or insert them placeholders)
@@ -89,26 +92,28 @@ Example Response:
                         type="Concept"
                     )
                     db.add(ph_node)
-            db.commit()
+                    db.commit()
             
-            # Check edge duplication
-            exists_edge = db.query(GraphEdgeDB).filter(
-                GraphEdgeDB.source_id == src,
-                GraphEdgeDB.target_id == tgt,
-                GraphEdgeDB.relation == rel
-            ).first()
-            
-            if not exists_edge:
-                db_edge = GraphEdgeDB(
-                    source_id=src,
-                    target_id=tgt,
-                    relation=rel,
-                    weight=wt
-                )
-                db.add(db_edge)
-            
-            # Always return the edges identified in the text
-            extracted_data["edges"].append({"source": src, "target": tgt, "relation": rel})
+            edge_key = (src, tgt, rel)
+            if edge_key not in seen_edge_keys:
+                seen_edge_keys.add(edge_key)
+                # Check edge duplication
+                exists_edge = db.query(GraphEdgeDB).filter(
+                    GraphEdgeDB.source_id == src,
+                    GraphEdgeDB.target_id == tgt,
+                    GraphEdgeDB.relation == rel
+                ).first()
+                
+                if not exists_edge:
+                    db_edge = GraphEdgeDB(
+                        source_id=src,
+                        target_id=tgt,
+                        relation=rel,
+                        weight=wt
+                    )
+                    db.add(db_edge)
+                
+                extracted_data["edges"].append({"source": src, "target": tgt, "relation": rel})
                 
         db.commit()
     except Exception as e:
@@ -122,8 +127,29 @@ def get_graph_data(db: Session) -> Dict[str, Any]:
     edges = db.query(GraphEdgeDB).all()
     
     return {
-        "nodes": [{"id": n.id, "label": n.label, "type": n.type, "properties": n.properties} for n in nodes],
-        "edges": [{"id": e.id, "source": e.source_id, "target": e.target_id, "relation": e.relation, "weight": e.weight} for e in edges]
+        "nodes": [
+            {
+                "id": n.id,
+                "label": n.label,
+                "type": n.type,
+                "properties": n.properties or {},
+                "created_at": n.created_at
+            }
+            for n in nodes
+        ],
+        "edges": [
+            {
+                "id": e.id,
+                "source_id": e.source_id,
+                "target_id": e.target_id,
+                "source": e.source_id,
+                "target": e.target_id,
+                "relation": e.relation,
+                "weight": e.weight,
+                "created_at": e.created_at
+            }
+            for e in edges
+        ]
     }
 
 def generate_visjs_html(db: Session) -> str:

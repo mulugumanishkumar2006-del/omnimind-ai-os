@@ -60,6 +60,9 @@ Provide only the optimized version of the prompt template. Focus on injecting st
 """
 
     res = await execute_llm_call("PromptOptimizerAgent", prompt, db, complexity_override="medium")
+    if not res.get("success", False):
+        logger.error("Prompt optimization failed: %s", res.get("error", "Unknown error"))
+        return None
     optimized_template = res["output"].strip()
     
     # Version bump and write to Prompt Studio database

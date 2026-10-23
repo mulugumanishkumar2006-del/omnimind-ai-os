@@ -365,10 +365,15 @@ async function loadAgentSessions() {
     sessions.forEach(s => {
         const item = document.createElement("div");
         item.className = "task-tree-item";
+        const stColor = s.status === "success" ? "#10b981" : "#ef4444";
         item.innerHTML = `
             <div>
                 <strong>Goal: "${s.goal}"</strong>
-                <div style="font-size:0.8rem; color:#9ca3af; margin-top:0.3rem;">Status: <span style="color:#10b981;">${s.status.toUpperCase()}</span> | Steps: ${s.steps.length}</div>
+                <div style="font-size:0.8rem; color:#9ca3af; margin-top:0.3rem;">
+                    Status: <span style="color:${stColor}; font-weight:600;">${(s.status || "unknown").toUpperCase()}</span> | 
+                    Steps: ${(s.steps || []).length} | 
+                    Created: ${new Date(s.created_at).toLocaleTimeString()}
+                </div>
             </div>
         `;
         container.appendChild(item);
@@ -383,25 +388,43 @@ async function orchestrateAgents() {
     const feed = document.getElementById("agent-pipeline-feed");
     
     stepperPanel.style.display = "block";
-    feed.innerHTML = "<div class='loading-placeholder'>Coordinator agent mapping out steps...</div>";
+    feed.innerHTML = "<div class='loading-placeholder'>Coordinator agent orchestrating multi-agent cascade...</div>";
     
     const res = await apiPost("/agents/run", { goal });
     if (res) {
         feed.innerHTML = "";
-        res.steps.forEach((step, idx) => {
+        const isSuccess = res.status === "success";
+        const statusHeader = document.getElementById("agent-pipeline-status");
+        if (statusHeader) {
+            statusHeader.innerText = isSuccess ? "Pipeline Completed Successfully!" : "Pipeline Halted with Errors!";
+            statusHeader.style.color = isSuccess ? "#10b981" : "#ef4444";
+        }
+
+        (res.steps || []).forEach((step, idx) => {
             const card = document.createElement("div");
             card.className = "step-card";
+            const stepSt = (step.status || "completed").toUpperCase();
+            const badgeColor = stepSt === "COMPLETED" ? "#10b981" : (stepSt === "RETRYING" ? "#f59e0b" : "#ef4444");
+            const simBadge = step.is_simulated ? " <span style='color:#f59e0b;'>[SIMULATED]</span>" : "";
+            const provText = step.provider ? `Provider: ${step.provider} | ` : "";
+
             card.innerHTML = `
-                <div class="step-card-header">
-                    <strong>[${idx+1}] ${step.agent_name}</strong>
-                    <span style="color:#6b7280;">${step.action} (${step.latency.toFixed(2)}s)</span>
+                <div class="step-card-header" style="display:flex; justify-content:space-between; align-items:center;">
+                    <div>
+                        <strong>[${idx+1}] ${step.agent_name} (${step.agent_role || 'Agent'})</strong>
+                        <span style="color:#6b7280; font-size:0.8rem; margin-left:0.5rem;">${step.action}</span>
+                    </div>
+                    <span style="color:${badgeColor}; font-weight:600; font-size:0.8rem;">[${stepSt}]${simBadge}</span>
                 </div>
-                <p style="font-size:0.9rem; color:#d1d5db; line-height:1.4;">${step.message}</p>
+                <div style="font-size:0.75rem; color:#888; margin-top:0.2rem; margin-bottom:0.4rem;">
+                    ${provText}Latency: ${parseFloat(step.latency || 0).toFixed(2)}s | Retries: ${step.retry_count || 0}
+                </div>
+                <p style="font-size:0.9rem; color:#d1d5db; line-height:1.4; white-space:pre-wrap;">${step.message}</p>
+                ${step.failure_details ? `<div style="color:#ef4444; font-size:0.8rem; margin-top:0.3rem;">Error: ${step.failure_details}</div>` : ""}
             `;
             feed.appendChild(card);
         });
         
-        document.getElementById("agent-pipeline-status").innerText = "Pipeline Completed!";
         document.getElementById("input-agent-goal").value = "";
         loadAgentSessions();
         updateGlobalHeaderStats();

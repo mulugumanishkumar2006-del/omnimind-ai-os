@@ -12,6 +12,11 @@ class MemoryBase(BaseModel):
 class MemoryCreate(MemoryBase):
     pass
 
+class MemoryUpdate(BaseModel):
+    content: Optional[str] = None
+    type: Optional[str] = None
+    metadata_json: Optional[Dict[str, Any]] = None
+
 class MemoryResponse(MemoryBase):
     id: str
     created_at: datetime
@@ -33,6 +38,24 @@ class TaskBase(BaseModel):
 class TaskCreate(TaskBase):
     pass
 
+class TaskProgressUpdate(BaseModel):
+    progress: float
+    status: Optional[str] = "in_progress"
+
+class TaskUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    progress: Optional[float] = None
+    estimated_hours: Optional[float] = None
+    deadline: Optional[datetime] = None
+
+class ObjectivePlanRequest(BaseModel):
+    objective: str
+    target_days: Optional[int] = 7
+    category: Optional[str] = "learning_plan"
+    auto_execute: Optional[bool] = False
+
 class TaskResponse(TaskBase):
     id: str
     created_at: datetime
@@ -53,7 +76,7 @@ class NodeBase(BaseModel):
     properties: Dict[str, Any] = Field(default_factory=dict)
 
 class NodeResponse(NodeBase):
-    created_at: datetime
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -66,7 +89,9 @@ class EdgeBase(BaseModel):
 
 class EdgeResponse(EdgeBase):
     id: str
-    created_at: datetime
+    source: Optional[str] = None
+    target: Optional[str] = None
+    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -144,6 +169,9 @@ class ModelRouteRequest(BaseModel):
     prompt_name: str
     prompt_text: str
     complexity_override: Optional[str] = None  # low, medium, high
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    allow_fallback: Optional[bool] = None
 
 class ModelRouteLogResponse(BaseModel):
     id: str
@@ -162,6 +190,14 @@ class ModelRouteLogResponse(BaseModel):
 # ==================== Security ====================
 class SecurityScanRequest(BaseModel):
     input_text: str
+
+class SecurityScrubRequest(BaseModel):
+    input_text: str
+
+class SecurityScrubResponse(BaseModel):
+    original_text: str
+    scrubbed_text: str
+    pii_detected: bool
 
 class SecurityThreatLogResponse(BaseModel):
     id: str
@@ -213,6 +249,11 @@ class CareerRecommendationResponse(BaseModel):
 # ==================== Agent Sessions ====================
 class AgentRunRequest(BaseModel):
     goal: str
+    task_id: Optional[str] = None
+    max_steps: Optional[int] = None
+    max_retries: Optional[int] = None
+    provider_override: Optional[str] = None
+    model_override: Optional[str] = None
 
 class AgentStep(BaseModel):
     agent_name: str
@@ -221,6 +262,19 @@ class AgentStep(BaseModel):
     cost: float = 0.0
     latency: float = 0.0
     timestamp: str
+    execution_id: Optional[str] = None
+    task_id: Optional[str] = None
+    agent_role: Optional[str] = None
+    status: Optional[str] = "completed"  # pending, running, completed, failed, retrying
+    input_summary: Optional[str] = None
+    output_summary: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    is_simulated: Optional[bool] = False
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    retry_count: Optional[int] = 0
+    failure_details: Optional[str] = None
 
 class AgentSessionResponse(BaseModel):
     id: str

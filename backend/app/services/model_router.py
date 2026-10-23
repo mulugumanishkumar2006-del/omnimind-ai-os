@@ -1,20 +1,236 @@
+import re
 import time
 import httpx
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 from sqlalchemy.orm import Session
 from backend.app.core.config import settings
 from backend.app.models.database_models import ModelRouteLogDB
 
 logger = logging.getLogger(__name__)
 
-# Constants for cost tracking (simulated prices per 1k tokens)
+# Constants for cost tracking (prices in USD per 1k tokens)
 TOKEN_PRICING = {
     "openai": {"input": 0.005, "output": 0.015, "default_model": "gpt-4o"},
     "claude": {"input": 0.003, "output": 0.015, "default_model": "claude-3-5-sonnet"},
     "gemini": {"input": 0.00125, "output": 0.00375, "default_model": "gemini-1.5-flash"},
     "deepseek": {"input": 0.00014, "output": 0.00028, "default_model": "deepseek-chat"},
-    "local": {"input": 0.0, "output": 0.0, "default_model": "llama3"}
+    "ollama": {"input": 0.0, "output": 0.0, "default_model": "llama3:latest"},
+    "local": {"input": 0.0, "output": 0.0, "default_model": "llama3:latest"}
+}
+
+def redact_secrets(text: Optional[str]) -> str:
+    """Redact known API keys, tokens, and authorization parameters from error messages and logs."""
+    if not text:
+        return ""
+    sanitized = str(text)
+    for key in [
+        settings.OPENAI_API_KEY,
+        settings.GEMINI_API_KEY,
+        settings.CLAUDE_API_KEY,
+        settings.DEEPSEEK_API_KEY
+    ]:
+        if key and len(key) > 5:
+            sanitized = sanitized.replace(key, "[REDACTED_API_KEY]")
+            
+    # Redact standard provider secret formats (OpenAI, Anthropic Claude, Google Gemini, DeepSeek)
+    sanitized = re.sub(r'sk-[a-zA-Z0-9_\-]{20,}', '[REDACTED_API_KEY]', sanitized)
+    sanitized = re.sub(r'AIzaSy[0-9A-Za-z_\-]{33}', '[REDACTED_API_KEY]', sanitized)
+    
+    # Redact query parameter keys and authorization headers
+    sanitized = re.sub(r'(key|api_key|token|auth|secret)[\s:=]+([A-Za-z0-9_\-\.]{8,})', r'\1=[REDACTED_KEY]', sanitized, flags=re.IGNORECASE)
+    sanitized = re.sub(r'Bearer\s+[A-Za-z0-9_.-]{8,}', 'Bearer [REDACTED_TOKEN]', sanitized, flags=re.IGNORECASE)
+    return sanitized
+
+
+# =====================================================================
+# PROVIDER ADAPTERS
+# =====================================================================
+
+class BaseProviderAdapter:
+    """Interface definition for LLM providers."""
+    async def call(self, model: str, prompt: str, timeout: float) -> Tuple[str, int, int, Dict[str, Any]]:
+        raise NotImplementedError
+
+class OllamaProvider(BaseProviderAdapter):
+    """Local LLM provider interfacing with the Ollama HTTP API."""
+    def __init__(self, base_url: Optional[str] = None):
+        self.base_url = (base_url or settings.OLLAMA_BASE_URL).rstrip("/")
+
+    async def check_health(self, timeout: float = 2.0) -> Dict[str, Any]:
+        """Detect whether the Ollama daemon is reachable and enumerate installed models."""
+        url = f"{self.base_url}/api/tags"
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.get(url)
+                if r.status_code == 200:
+                    data = r.json()
+                    models = [m["name"] for m in data.get("models", [])]
+                    return {"reachable": True, "base_url": self.base_url, "models": models}
+                return {"reachable": False, "base_url": self.base_url, "status_code": r.status_code}
+        except Exception as e:
+            return {"reachable": False, "base_url": self.base_url, "models": [], "error": redact_secrets(str(e))}
+
+    async def call(self, model: str, prompt: str, timeout: Optional[float] = None) -> Tuple[str, int, int, Dict[str, Any]]:
+        call_timeout = timeout or settings.OLLAMA_TIMEOUT
+        chat_url = f"{self.base_url}/api/chat"
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=call_timeout) as client:
+                r = await client.post(chat_url, json=payload)
+                if r.status_code == 404:
+                    err_msg = ""
+                    try:
+                        err_msg = r.json().get("error", "")
+                    except Exception:
+                        err_msg = r.text
+                    raise RuntimeError(
+                        f"Ollama model '{model}' not found on server at {self.base_url}: {err_msg}. "
+                        f"Run 'ollama pull {model}' to download it."
+                    )
+                r.raise_for_status()
+                res = r.json()
+                
+                content = res.get("message", {}).get("content", "")
+                if not content:
+                    raise RuntimeError("Ollama returned an empty response.")
+                    
+                input_tokens = res.get("prompt_eval_count") or (len(prompt) // 4)
+                output_tokens = res.get("eval_count") or (len(content) // 4)
+                metadata = {
+                    "total_duration_ns": res.get("total_duration"),
+                    "load_duration_ns": res.get("load_duration"),
+                    "prompt_eval_count": res.get("prompt_eval_count"),
+                    "eval_count": res.get("eval_count")
+                }
+                return content, int(input_tokens), int(output_tokens), metadata
+        except httpx.ConnectError:
+            raise RuntimeError(
+                f"Cannot connect to Ollama at {self.base_url}. Ensure Ollama is running ('ollama serve')."
+            )
+        except httpx.TimeoutException:
+            raise RuntimeError(
+                f"Ollama request to {self.base_url} timed out after {call_timeout}s."
+            )
+        except Exception as e:
+            raise RuntimeError(redact_secrets(str(e)))
+
+class OpenAIProvider(BaseProviderAdapter):
+    """Remote OpenAI LLM Provider."""
+    async def call(self, model: str, prompt: str, timeout: float = 30.0) -> Tuple[str, int, int, Dict[str, Any]]:
+        if not settings.OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY is not configured.")
+        headers = {
+            "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7
+        }
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
+                r.raise_for_status()
+                res = r.json()
+                content = res["choices"][0]["message"]["content"]
+                in_tok = res.get("usage", {}).get("prompt_tokens", len(prompt) // 4)
+                out_tok = res.get("usage", {}).get("completion_tokens", len(content) // 4)
+                return content, in_tok, out_tok, {"finish_reason": res["choices"][0].get("finish_reason")}
+        except Exception as e:
+            raise RuntimeError(redact_secrets(str(e)))
+
+class GeminiProvider(BaseProviderAdapter):
+    """Remote Google Gemini LLM Provider."""
+    async def call(self, model: str, prompt: str, timeout: float = 30.0) -> Tuple[str, int, int, Dict[str, Any]]:
+        if not settings.GEMINI_API_KEY:
+            raise ValueError("GEMINI_API_KEY is not configured.")
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": settings.GEMINI_API_KEY
+        }
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(url, json=payload, headers=headers)
+                r.raise_for_status()
+                res = r.json()
+                content = res["candidates"][0]["content"]["parts"][0]["text"]
+                usage = res.get("usageMetadata", {})
+                in_tok = usage.get("promptTokenCount", len(prompt) // 4)
+                out_tok = usage.get("candidatesTokenCount", len(content) // 4)
+                return content, in_tok, out_tok, {"usageMetadata": usage}
+        except Exception as e:
+            raise RuntimeError(redact_secrets(str(e)))
+
+class ClaudeProvider(BaseProviderAdapter):
+    """Remote Anthropic Claude LLM Provider."""
+    async def call(self, model: str, prompt: str, timeout: float = 30.0) -> Tuple[str, int, int, Dict[str, Any]]:
+        if not settings.CLAUDE_API_KEY:
+            raise ValueError("CLAUDE_API_KEY is not configured.")
+        headers = {
+            "x-api-key": settings.CLAUDE_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": model,
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post("https://api.anthropic.com/v1/messages", json=payload, headers=headers)
+                r.raise_for_status()
+                res = r.json()
+                content = res["content"][0]["text"]
+                in_tok = res.get("usage", {}).get("input_tokens", len(prompt) // 4)
+                out_tok = res.get("usage", {}).get("output_tokens", len(content) // 4)
+                return content, in_tok, out_tok, {}
+        except Exception as e:
+            raise RuntimeError(redact_secrets(str(e)))
+
+class DeepSeekProvider(BaseProviderAdapter):
+    """Remote DeepSeek LLM Provider."""
+    async def call(self, model: str, prompt: str, timeout: float = 30.0) -> Tuple[str, int, int, Dict[str, Any]]:
+        if not settings.DEEPSEEK_API_KEY:
+            raise ValueError("DEEPSEEK_API_KEY is not configured.")
+        headers = {
+            "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7
+        }
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post("https://api.deepseek.com/v1/chat/completions", json=payload, headers=headers)
+                r.raise_for_status()
+                res = r.json()
+                content = res["choices"][0]["message"]["content"]
+                in_tok = res.get("usage", {}).get("prompt_tokens", len(prompt) // 4)
+                out_tok = res.get("usage", {}).get("completion_tokens", len(content) // 4)
+                return content, in_tok, out_tok, {}
+        except Exception as e:
+            raise RuntimeError(redact_secrets(str(e)))
+
+
+PROVIDERS: Dict[str, BaseProviderAdapter] = {
+    "ollama": OllamaProvider(),
+    "local": OllamaProvider(),
+    "openai": OpenAIProvider(),
+    "gemini": GeminiProvider(),
+    "claude": ClaudeProvider(),
+    "deepseek": DeepSeekProvider()
 }
 
 def analyze_complexity(prompt_text: str) -> str:
@@ -26,9 +242,8 @@ def analyze_complexity(prompt_text: str) -> str:
         return "medium"
     return "low"
 
-def route_request(complexity: str) -> tuple[str, str]:
-    """Determine provider and model based on query complexity or environment overrides."""
-    # Check if user specified a default provider via environment variable
+def route_request(complexity: str) -> Tuple[str, str]:
+    """Determine provider and model based on query complexity, environment variables, or availability."""
     if settings.DEFAULT_LLM_PROVIDER:
         provider = settings.DEFAULT_LLM_PROVIDER.lower()
         default_model = TOKEN_PRICING.get(provider, {}).get("default_model", "default")
@@ -36,172 +251,210 @@ def route_request(complexity: str) -> tuple[str, str]:
         return provider, model
 
     if complexity == "high":
-        # Route to more capable models
         if settings.CLAUDE_API_KEY:
             return "claude", TOKEN_PRICING["claude"]["default_model"]
         elif settings.OPENAI_API_KEY:
             return "openai", TOKEN_PRICING["openai"]["default_model"]
     elif complexity == "medium":
-        # Route to balanced models
         if settings.GEMINI_API_KEY:
             return "gemini", TOKEN_PRICING["gemini"]["default_model"]
         elif settings.DEEPSEEK_API_KEY:
             return "deepseek", TOKEN_PRICING["deepseek"]["default_model"]
     
-    # Low complexity or default fallback
+    # Low complexity or default provider
     if settings.GEMINI_API_KEY:
         return "gemini", TOKEN_PRICING["gemini"]["default_model"]
     elif settings.OPENAI_API_KEY:
         return "openai", "gpt-3.5-turbo"
     
-    return "local", TOKEN_PRICING["local"]["default_model"]
+    return "ollama", TOKEN_PRICING["ollama"]["default_model"]
+
+async def _call_real_provider(provider: str, model: str, prompt: str) -> Tuple[str, int, int, Dict[str, Any]]:
+    """Private dispatcher to invoke real LLM provider adapters."""
+    clean_provider = provider.lower()
+    adapter = PROVIDERS.get(clean_provider)
+    if not adapter:
+        raise NotImplementedError(f"Provider '{provider}' is not supported.")
+    return await adapter.call(model, prompt, timeout=settings.OLLAMA_TIMEOUT if clean_provider in ("ollama", "local") else 30.0)
 
 async def execute_llm_call(
     prompt_name: str,
     prompt_text: str,
     db: Session,
-    complexity_override: Optional[str] = None
+    complexity_override: Optional[str] = None,
+    provider_override: Optional[str] = None,
+    model_override: Optional[str] = None,
+    allow_fallback_override: Optional[bool] = None
 ) -> Dict[str, Any]:
-    """Execute LLM call via routed provider, tracking costs, latency, simulation status, and saving logs."""
+    """Execute LLM call via routed or overridden provider with cost/latency tracking and honest simulation reporting."""
     complexity = complexity_override or analyze_complexity(prompt_text)
-    provider, model = route_request(complexity)
+    
+    routed_provider, routed_model = route_request(complexity)
+    provider = (provider_override or routed_provider).lower()
+    model = model_override or routed_model
+    
+    # Determine fallback policy
+    allow_fallback = (
+        allow_fallback_override
+        if allow_fallback_override is not None
+        else settings.ALLOW_SIMULATION_FALLBACK
+    )
     
     start_time = time.time()
     success = True
     output_text = ""
-    input_tokens = len(prompt_text) // 4  # Rough heuristic
+    input_tokens = len(prompt_text) // 4
     output_tokens = 0
     cost = 0.0
     is_simulated = False
+    is_fallback = False
+    fallback_reason: Optional[str] = None
+    error_detail: Optional[str] = None
+    raw_metadata: Dict[str, Any] = {}
     
-    # 1. Real API execution check
-    has_key = {
+    # Check if this provider has credentials / can run in real mode
+    has_credentials = {
         "openai": bool(settings.OPENAI_API_KEY),
         "claude": bool(settings.CLAUDE_API_KEY),
         "gemini": bool(settings.GEMINI_API_KEY),
         "deepseek": bool(settings.DEEPSEEK_API_KEY),
-        "local": False
+        "ollama": True,
+        "local": True
     }.get(provider, False)
     
-    if has_key and not settings.SIMULATION_MODE:
-        try:
-            output_text, input_tokens, output_tokens = await _call_real_provider(provider, model, prompt_text)
-            is_simulated = False
-        except Exception as e:
-            logger.error("Real LLM call failed, reverting to simulation: %s", str(e))
-            success = False
-            is_simulated = True
-            output_text = _generate_simulated_response(prompt_name, prompt_text)
-            output_tokens = len(output_text) // 4
-    else:
-        # Simulation Mode
+    # If explicit SIMULATION_MODE is enabled or requested provider is simulated
+    if settings.SIMULATION_MODE or provider in ("simulated", "simulation"):
         is_simulated = True
         output_text = _generate_simulated_response(prompt_name, prompt_text)
         output_tokens = len(output_text) // 4
-    
+        logged_provider = f"{provider} (simulated)"
+    else:
+        # Real provider execution
+        if has_credentials:
+            try:
+                output_text, input_tokens, output_tokens, raw_metadata = await _call_real_provider(provider, model, prompt_text)
+                is_simulated = False
+                success = True
+                logged_provider = provider
+            except Exception as e:
+                error_detail = redact_secrets(str(e))
+                logger.error("Real LLM call failed for provider %s: %s", provider, error_detail)
+                
+                if allow_fallback:
+                    # Disclose explicit simulation fallback
+                    success = False
+                    is_simulated = True
+                    is_fallback = True
+                    fallback_reason = error_detail
+                    logged_provider = f"{provider} (simulated fallback)"
+                    output_text = _generate_simulated_response(prompt_name, prompt_text)
+                    output_tokens = len(output_text) // 4
+                else:
+                    # Honest failure: do NOT silently mask with simulated text
+                    success = False
+                    is_simulated = False
+                    is_fallback = False
+                    logged_provider = provider
+                    output_text = f"Provider Error ({provider}): {error_detail}"
+                    output_tokens = 0
+        else:
+            # Provider missing credentials
+            error_detail = f"Provider '{provider}' is not configured with an API key."
+            if allow_fallback:
+                success = False
+                is_simulated = True
+                is_fallback = True
+                fallback_reason = error_detail
+                logged_provider = f"{provider} (simulated fallback)"
+                output_text = _generate_simulated_response(prompt_name, prompt_text)
+                output_tokens = len(output_text) // 4
+            else:
+                success = False
+                is_simulated = False
+                is_fallback = False
+                logged_provider = provider
+                output_text = f"Provider Error ({provider}): {error_detail}"
+                output_tokens = 0
+                
     latency = time.time() - start_time
     
-    # Calculate pricing (0 for simulated calls)
-    if not is_simulated:
+    # Calculate pricing (0 for simulated or failed calls)
+    if not is_simulated and success:
         rates = TOKEN_PRICING.get(provider, {"input": 0.0, "output": 0.0})
         cost = ((input_tokens / 1000) * rates["input"]) + ((output_tokens / 1000) * rates["output"])
     else:
         cost = 0.0
+        
+    # Log execution to DB
+    try:
+        log_entry = ModelRouteLogDB(
+            prompt_name=prompt_name,
+            provider=logged_provider[:50],
+            model_name=model,
+            complexity=complexity,
+            cost=round(cost, 6),
+            latency=round(latency, 4),
+            reliability_success=success
+        )
+        db.add(log_entry)
+        db.commit()
+        db.refresh(log_entry)
+    except Exception as log_err:
+        logger.error("Failed to persist model routing log to database: %s", str(log_err))
 
-    logged_provider = f"{provider} (simulated)" if is_simulated else provider
-    
-    # Log to DB
-    log_entry = ModelRouteLogDB(
-        prompt_name=prompt_name,
-        provider=logged_provider[:50],
-        model_name=model,
-        complexity=complexity,
-        cost=cost,
-        latency=latency,
-        reliability_success=success
-    )
-    db.add(log_entry)
-    db.commit()
-    db.refresh(log_entry)
-    
     return {
         "output": output_text,
         "provider": logged_provider,
         "model": model,
-        "cost": cost,
-        "latency": latency,
+        "cost": round(cost, 6),
+        "latency": round(latency, 4),
         "tokens": input_tokens + output_tokens,
         "success": success,
-        "is_simulated": is_simulated
+        "is_simulated": is_simulated,
+        "is_fallback": is_fallback,
+        "fallback_reason": fallback_reason,
+        "error": error_detail,
+        "metadata": raw_metadata
     }
 
-async def _call_real_provider(provider: str, model: str, prompt: str) -> tuple[str, int, int]:
-    """Private helper to invoke external APIs using httpx."""
-    # We implement simple HTTP integrations for each provider
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        if provider == "openai":
-            headers = {"Authorization": f"Bearer {settings.OPENAI_API_KEY}", "Content-Type": "application/json"}
-            payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.7}
-            r = await client.post("https://api.openai.com/v1/chat/completions", json=payload, headers=headers)
-            r.raise_for_status()
-            res = r.json()
-            return (
-                res["choices"][0]["message"]["content"],
-                res["usage"]["prompt_tokens"],
-                res["usage"]["completion_tokens"]
-            )
-            
-        elif provider == "gemini":
-            headers = {"Content-Type": "application/json"}
-            payload = {"contents": [{"parts": [{"text": prompt}]}]}
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={settings.GEMINI_API_KEY}"
-            r = await client.post(url, json=payload, headers=headers)
-            r.raise_for_status()
-            res = r.json()
-            content = res["candidates"][0]["content"]["parts"][0]["text"]
-            # Estimate tokens roughly since gemini returns tokens in metadata sometimes
-            return content, len(prompt) // 4, len(content) // 4
-            
-        elif provider == "claude":
-            headers = {
-                "x-api-key": settings.CLAUDE_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": model,
-                "max_tokens": 1024,
-                "messages": [{"role": "user", "content": prompt}]
-            }
-            r = await client.post("https://api.anthropic.com/v1/messages", json=payload, headers=headers)
-            r.raise_for_status()
-            res = r.json()
-            return (
-                res["content"][0]["text"],
-                res["usage"]["input_tokens"],
-                res["usage"]["output_tokens"]
-            )
-            
-        elif provider == "deepseek":
-            headers = {"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}", "Content-Type": "application/json"}
-            payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.7}
-            r = await client.post("https://api.deepseek.com/v1/chat/completions", json=payload, headers=headers)
-            r.raise_for_status()
-            res = r.json()
-            return (
-                res["choices"][0]["message"]["content"],
-                res["usage"]["prompt_tokens"],
-                res["usage"]["completion_tokens"]
-            )
-            
-    raise NotImplementedError(f"Provider {provider} not supported.")
+async def get_router_diagnostics() -> Dict[str, Any]:
+    """Retrieve operational status of all supported LLM providers and runtime routing configuration."""
+    ollama_status = await OllamaProvider().check_health()
+    return {
+        "simulation_mode": settings.SIMULATION_MODE,
+        "allow_simulation_fallback": settings.ALLOW_SIMULATION_FALLBACK,
+        "default_provider": settings.DEFAULT_LLM_PROVIDER,
+        "default_model": settings.DEFAULT_LLM_MODEL,
+        "providers": {
+            "ollama": {
+                "configured": True,
+                "base_url": settings.OLLAMA_BASE_URL,
+                "reachable": ollama_status.get("reachable", False),
+                "available_models": ollama_status.get("models", [])
+            },
+            "openai": {"configured": bool(settings.OPENAI_API_KEY)},
+            "claude": {"configured": bool(settings.CLAUDE_API_KEY)},
+            "gemini": {"configured": bool(settings.GEMINI_API_KEY)},
+            "deepseek": {"configured": bool(settings.DEEPSEEK_API_KEY)}
+        }
+    }
 
 def _generate_simulated_response(prompt_name: str, prompt_text: str) -> str:
-    """Rich domain simulation engine to provide realistic responses for all 12 modules."""
+    """Rich domain simulation engine providing realistic responses for all 12 modules in simulation mode."""
     prompt_lower = prompt_text.lower()
     
+    # 0. Prompt Optimizer simulation
+    if "promptoptimizer" in prompt_name.lower() or "meta-prompt optimization agent" in prompt_lower:
+        return "You are an optimized agent system prompt. Verify inputs strictly, enforce JSON formatting rules, and handle error edge cases gracefully."
+
+    # 0.1 Memory Summarizer simulation
+    elif "memorysummarizer" in prompt_name.lower() or "summarize this memory" in prompt_lower:
+        clean_text = prompt_text.replace("Summarize this memory into a single sentence under 100 characters:\n\n", "").strip()
+        first_line = clean_text.split("\n")[0].split(".")[0].strip()
+        return f"Summary: {first_line[:75]}."
+
     # 1. Goal / Task breaking simulation
-    if "breakdown" in prompt_lower or "break down" in prompt_lower or "learning roadmap" in prompt_lower:
+    elif "breakdown" in prompt_lower or "break down" in prompt_lower or "learning roadmap" in prompt_lower:
         if "ai engineer" in prompt_lower:
             return """[
   {
@@ -252,8 +505,29 @@ def _generate_simulated_response(prompt_name: str, prompt_text: str) -> str:
 ]"""
             
     # 2. Knowledge Graph Node/Edge extraction simulation
-    elif "extract entity" in prompt_lower or "relationship" in prompt_lower or "knowledge graph" in prompt_lower:
-        return """{
+    elif "extract entity" in prompt_lower or "relationship" in prompt_lower or "knowledge graph" in prompt_lower or "knowledgegraph" in prompt_name.lower():
+        tokens = re.findall(r"\b[A-Za-z0-9_-]{3,20}\b", prompt_text)
+        stop_words = {"analyze", "the", "text", "below", "and", "extract", "key", "entities", "concepts", "format", "output", "strictly", "json", "object", "nodes", "edges", "example", "response", "list", "matching", "relation", "weight", "between", "unique", "identifier", "display", "name", "category", "how", "they", "connect", "written_in", "part_of", "true", "false", "for", "with", "from"}
+        keywords = [t for t in tokens if t.lower() not in stop_words]
+        unique_kw = []
+        for k in keywords:
+            if k.lower() not in [u.lower() for u in unique_kw]:
+                unique_kw.append(k)
+        if len(unique_kw) >= 2:
+            chosen = unique_kw[:4]
+            nodes = [{"id": c.lower(), "label": c.capitalize(), "type": "Concept", "properties": {}} for c in chosen]
+            edges = []
+            for i in range(len(nodes) - 1):
+                edges.append({
+                    "source_id": nodes[i]["id"],
+                    "target_id": nodes[i+1]["id"],
+                    "relation": "relates_to",
+                    "weight": 0.8
+                })
+            import json as _json
+            return _json.dumps({"nodes": nodes, "edges": edges})
+        else:
+            return """{
   "nodes": [
     {"id": "python", "label": "Python", "type": "Language", "properties": {"level": "core"}},
     {"id": "langgraph", "label": "LangGraph", "type": "Library", "properties": {"type": "agentic"}},
@@ -288,7 +562,7 @@ def _generate_simulated_response(prompt_name: str, prompt_text: str) -> str:
 }"""
     
     # 5. Self-Improvement response evaluator
-    elif "evaluate response" in prompt_lower or "failure analysis" in prompt_lower:
+    elif "evaluate response" in prompt_lower:
         return """{
   "failure_detected": true,
   "failure_type": "hallucination",
@@ -320,3 +594,4 @@ def _generate_simulated_response(prompt_name: str, prompt_text: str) -> str:
 
     # 8. General conversational fallback
     return f"This is a simulated high-quality response from OmniMind AI OS. I have analyzed your request: '{prompt_text[:60]}...' and processed it using the integrated agents framework."
+
