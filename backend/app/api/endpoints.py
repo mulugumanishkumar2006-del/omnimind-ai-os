@@ -220,15 +220,62 @@ def update_progress(
 async def extract_kg(req: schemas.KGExtractionRequest, db: Session = Depends(get_db)):
     if not req.content or not req.content.strip():
         raise HTTPException(status_code=400, detail="Content cannot be empty")
-    return await knowledge_graph.extract_knowledge(req.content, db)
+    try:
+        return await knowledge_graph.extract_knowledge(req.content, db)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
 
 @kg_router.get("/graph", response_model=schemas.GraphResponse)
-def get_graph(db: Session = Depends(get_db)):
-    return knowledge_graph.get_graph_data(db)
+def get_graph(
+    limit: Optional[int] = Query(None, ge=1, le=500),
+    node_type: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    return knowledge_graph.get_graph_data(db, limit=limit, node_type=node_type)
 
 @kg_router.get("/view", response_class=HTMLResponse)
 def view_network(db: Session = Depends(get_db)):
     return knowledge_graph.generate_visjs_html(db)
+
+@kg_router.get("/nodes/{id}", response_model=schemas.KGNodeDetailResponse)
+def get_node_detail(id: str, db: Session = Depends(get_db)):
+    node = knowledge_graph.get_node_by_id(id, db)
+    if not node:
+        raise HTTPException(status_code=404, detail="Entity node not found")
+    return node
+
+@kg_router.get("/nodes/{id}/neighbors")
+def get_node_neighbors(
+    id: str,
+    depth: int = Query(1, ge=1, le=3),
+    db: Session = Depends(get_db)
+):
+    subgraph = knowledge_graph.get_node_neighbors(id, db, depth=depth)
+    if not subgraph["nodes"]:
+        raise HTTPException(status_code=404, detail="Entity node not found")
+    return subgraph
+
+@kg_router.delete("/nodes/{id}")
+def delete_kg_node(id: str, db: Session = Depends(get_db)):
+    success = knowledge_graph.delete_node(id, db)
+    if not success:
+        raise HTTPException(status_code=404, detail="Entity node not found")
+    return {"message": "Node deleted successfully", "id": id}
+
+@kg_router.get("/search")
+def search_kg_nodes(
+    q: str = Query(..., min_length=1),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db)
+):
+    return knowledge_graph.search_nodes(q, db, limit=limit)
+
+@kg_router.post("/extract-from-memory/{memory_id}")
+async def extract_from_memory_route(memory_id: str, db: Session = Depends(get_db)):
+    res = await knowledge_graph.extract_from_memory(memory_id, db)
+    if res is None:
+        raise HTTPException(status_code=404, detail="Memory not found or content empty")
+    return res
 
 
 # ==================== Multi-Agent System Routes ====================
@@ -389,7 +436,7 @@ def get_routing_logs(limit: int = 50, db: Session = Depends(get_db)):
 
 
 # ==================== Security Center Routes ====================
-@security_router.post("/scan")
+@security_router.post("/scan", response_model=schemas.SecurityScanResponse)
 def scan_input(req: schemas.SecurityScanRequest, db: Session = Depends(get_db)):
     if not req.input_text or not req.input_text.strip():
         raise HTTPException(status_code=400, detail="Input text cannot be empty")
@@ -405,6 +452,12 @@ def scrub_input(req: schemas.SecurityScrubRequest):
         "scrubbed_text": scrubbed,
         "pii_detected": scrubbed != req.input_text
     }
+
+@security_router.post("/sanitize", response_model=schemas.OutputSanitizeResponse)
+def sanitize_model_output(req: schemas.OutputSanitizeRequest):
+    if req.text is None:
+        raise HTTPException(status_code=400, detail="Text cannot be None")
+    return security_scanner.sanitize_output(req.text)
 
 @security_router.get("/logs", response_model=List[schemas.SecurityThreatLogResponse])
 def get_threat_logs(limit: int = 50, db: Session = Depends(get_db)):

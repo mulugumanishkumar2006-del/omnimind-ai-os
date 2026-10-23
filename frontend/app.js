@@ -791,19 +791,51 @@ async function scanInput() {
     if (!input_text) return;
     
     const results = document.getElementById("security-scan-results");
-    results.innerHTML = "<div class='loading-placeholder'>Executing vulnerability scanner...</div>";
+    results.innerHTML = "<div class='loading-placeholder'>Executing security & privacy scanner...</div>";
     
     const res = await apiPost("/security/scan", { input_text });
     if (res) {
         const statusClass = res.is_safe ? "success" : "danger";
-        const statusText = res.is_safe ? "Clean Query" : "VULNERABILITY THREAT";
-        results.innerHTML = `
-            <div style="background:rgba(255,255,255,0.01); border:1px solid var(--border); padding:1rem; border-radius:6px; border-left:4px solid var(--${statusClass});">
-                <div style="display:flex; justify-content:space-between;">
-                    <strong>Scanner Status: <span style="color:var(--${statusClass});">${statusText}</span></strong>
-                    <span>Safety Score: ${res.safety_score}%</span>
+        const statusText = res.is_safe ? "Clean Query" : "SECURITY RISK DETECTED";
+        const riskColor = res.risk_level === "critical" ? "#dc2626" : (res.risk_level === "high" ? "#ef4444" : (res.risk_level === "medium" ? "#f59e0b" : "#10b981"));
+        
+        let findingsHtml = "";
+        if (res.findings && res.findings.length > 0) {
+            findingsHtml = `
+                <div style="margin-top:0.75rem; display:flex; flex-direction:column; gap:0.5rem;">
+                    ${res.findings.map(f => `
+                        <div style="background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.08); border-radius:4px; padding:0.5rem 0.75rem;">
+                            <div style="display:flex; justify-content:space-between; font-size:0.8rem; margin-bottom:0.25rem;">
+                                <span style="font-weight:600; color:#e2e8f0;">[${f.category.toUpperCase()}] ${f.matched_pattern}</span>
+                                <span style="background:${f.severity === 'critical' ? '#dc2626' : (f.severity === 'high' ? '#ef4444' : '#f59e0b')}; color:white; padding:1px 6px; border-radius:3px; font-size:0.7rem; font-weight:700;">${f.severity.toUpperCase()}</span>
+                            </div>
+                            <div style="font-size:0.8rem; color:#94a3b8;">${f.explanation}</div>
+                            <div style="font-size:0.75rem; color:#38bdf8; margin-top:0.2rem;">💡 Action: ${f.recommended_action}</div>
+                        </div>
+                    `).join("")}
                 </div>
-                ${!res.is_safe ? `<p style="color:#ef4444; font-size:0.85rem; margin-top:0.3rem;">Flagged: ${res.threats.join(", ")}</p>` : ""}
+            `;
+        }
+
+        let scrubbedHtml = "";
+        if (res.scrubbed_preview && res.scrubbed_preview !== input_text) {
+            scrubbedHtml = `
+                <div style="margin-top:0.75rem; background:rgba(16,185,129,0.05); border:1px solid rgba(16,185,129,0.2); padding:0.5rem 0.75rem; border-radius:4px;">
+                    <div style="font-size:0.75rem; font-weight:600; color:#10b981; margin-bottom:0.2rem;">🔒 Safe Scrubbed Preview:</div>
+                    <pre style="font-size:0.8rem; color:#a7f3d0; margin:0; white-space:pre-wrap;">${res.scrubbed_preview}</pre>
+                </div>
+            `;
+        }
+
+        results.innerHTML = `
+            <div style="background:rgba(255,255,255,0.01); border:1px solid var(--border); padding:1rem; border-radius:6px; border-left:4px solid ${riskColor};">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <strong>Scanner Status: <span style="color:${riskColor};">${statusText}</span></strong>
+                    <span style="font-size:0.85rem; background:rgba(255,255,255,0.06); padding:2px 8px; border-radius:4px;">Safety Score: <b>${res.safety_score}%</b> | Risk: <b style="color:${riskColor};">${res.risk_level.toUpperCase()}</b></span>
+                </div>
+                ${!res.is_safe ? `<p style="color:#ef4444; font-size:0.85rem; margin-top:0.4rem;">Flagged Triggers: ${res.threats.join("; ")}</p>` : "<p style='color:#10b981; font-size:0.85rem; margin-top:0.4rem;'>No known injection or data leaks detected.</p>"}
+                ${findingsHtml}
+                ${scrubbedHtml}
             </div>
         `;
         document.getElementById("input-security-text").value = "";

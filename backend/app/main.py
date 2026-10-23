@@ -21,14 +21,60 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS configurations for Streamlit interactions
+# CORS configurations
+allowed_origins = getattr(settings, "CORS_ORIGINS", [
+    "http://localhost:8501", "http://127.0.0.1:8501",
+    "http://localhost:8000", "http://127.0.0.1:8000"
+])
+has_wildcard = "*" in allowed_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=allowed_origins if allowed_origins else ["*"],
+    allow_credentials=not has_wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Request payload size boundary protection middleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, max_upload_size: int = 10 * 1024 * 1024):
+        super().__init__(app)
+        self.max_upload_size = max_upload_size
+
+    async def dispatch(self, request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length:
+            try:
+                if int(content_length) > self.max_upload_size:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": f"Payload too large. Maximum allowed size is {self.max_upload_size} bytes."}
+                    )
+            except (ValueError, TypeError):
+                pass
+        return await call_next(request)
+
+app.add_middleware(
+    RequestSizeLimitMiddleware,
+    max_upload_size=getattr(settings, "MAX_REQUEST_SIZE_BYTES", 10 * 1024 * 1024)
+)
+
+# Global unhandled exception handler preventing internal traceback / path leakage
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request, exc):
+    if isinstance(exc, (StarletteHTTPException, RequestValidationError)):
+        raise exc
+    logger.error("Unhandled internal server exception at %s: %s", request.url.path, str(exc), exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal server error occurred."}
+    )
 
 # Mount Routers
 api_prefix = settings.API_V1_STR

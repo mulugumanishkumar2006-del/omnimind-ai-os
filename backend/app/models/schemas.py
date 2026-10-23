@@ -103,6 +103,18 @@ class GraphResponse(BaseModel):
 class KGExtractionRequest(BaseModel):
     content: str
 
+class KGExtractionResponse(BaseModel):
+    nodes: List[Dict[str, Any]]
+    edges: List[Dict[str, Any]]
+    is_heuristic: bool = False
+    is_simulated: bool = False
+    extracted_count: int = 0
+
+class KGNodeDetailResponse(NodeResponse):
+    in_edges: List[EdgeResponse] = Field(default_factory=list)
+    out_edges: List[EdgeResponse] = Field(default_factory=list)
+    degree: int = 0
+
 # ==================== Prompts ====================
 class PromptBase(BaseModel):
     name: str
@@ -191,6 +203,22 @@ class ModelRouteLogResponse(BaseModel):
 class SecurityScanRequest(BaseModel):
     input_text: str
 
+class SecurityFinding(BaseModel):
+    category: str
+    severity: str  # low, medium, high, critical
+    matched_pattern: str
+    explanation: str
+    recommended_action: str
+    snippet: str
+
+class SecurityScanResponse(BaseModel):
+    is_safe: bool
+    safety_score: float
+    risk_level: str
+    threats: List[str]
+    findings: List[SecurityFinding] = Field(default_factory=list)
+    scrubbed_preview: str
+
 class SecurityScrubRequest(BaseModel):
     input_text: str
 
@@ -198,6 +226,14 @@ class SecurityScrubResponse(BaseModel):
     original_text: str
     scrubbed_text: str
     pii_detected: bool
+
+class OutputSanitizeRequest(BaseModel):
+    text: str
+
+class OutputSanitizeResponse(BaseModel):
+    original_text: str
+    sanitized_text: str
+    contains_xss_or_unsafe: bool
 
 class SecurityThreatLogResponse(BaseModel):
     id: str

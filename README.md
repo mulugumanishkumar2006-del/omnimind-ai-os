@@ -8,7 +8,7 @@ Quick pitch
 - Focus: memory vaults, task intelligence, observability, safe model routing, and deployable demos.
 
 Live demo / Try it locally
-- Demo: (add a public demo URL here when deployed)
+- Demo: 
 
 Fast 1-minute quickstart (local)
 1. Clone:
@@ -29,7 +29,7 @@ python run.py
 # Streamlit: http://127.0.0.1:8501
 ```
 
-Docker (recommended for reproducibility)
+Docker :
 ```bash
 docker compose up --build
 ```
@@ -37,11 +37,6 @@ docker compose up --build
 Why this project matters
 - Integrates production concerns (p95 latency, cost monitoring, hallucination detection) with developer ergonomics (prompt studio, model routing).
 - Designed with fallback adapters so it runs locally without external APIs for development and testing.
-
-What recruiters / reviewers should look for
-- README quickstart & demo (this file)
-- CI that runs regression tests and quality gates
-- Architecture notes and reproducible deployment (Docker)
 
 Technical architecture (high level)
 ```mermaid
@@ -62,14 +57,7 @@ Repository layout
 - infra/        — Docker compose, deployment configs
 - tests/        — Regression & quality gate suites
 
-Next improvements I suggest (I can open PRs for these)
-- Add a one-minute demo GIF and hosted public demo (Vercel/Render)
-- Add GitHub Actions CI to run regression tests and quality gates
-- Add CONTRIBUTING.md, LICENSE (MIT recommended), and CODE_OF_CONDUCT
-
 Contact / Maintainer
 - Mulugu Manish Kumar — https://github.com/mulugumanishkumar2006-del
 - Email: mulugumanishkumar2006@gmail.com
 
-License
-- MIT (add LICENSE file if not present)

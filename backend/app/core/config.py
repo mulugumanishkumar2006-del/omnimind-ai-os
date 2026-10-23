@@ -1,6 +1,6 @@
 import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Optional
+from typing import Optional, List
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "OmniMind AI OS"
@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     # Multi-Agent Workflow Execution Policy
     MAX_AGENT_STEPS: int = int(os.getenv("MAX_AGENT_STEPS", "10"))
     MAX_AGENT_RETRIES: int = int(os.getenv("MAX_AGENT_RETRIES", "2"))
+
+    # Security & Boundary Protection
+    CORS_ORIGINS: List[str] = [
+        origin.strip() for origin in os.getenv(
+            "CORS_ORIGINS",
+            "http://localhost:8501,http://127.0.0.1:8501,http://localhost:8000,http://127.0.0.1:8000"
+        ).split(",") if origin.strip()
+    ]
+    MAX_REQUEST_SIZE_BYTES: int = int(os.getenv("MAX_REQUEST_SIZE_BYTES", str(10 * 1024 * 1024)))  # 10 MB
+    MAX_INPUT_CHAR_LENGTH: int = int(os.getenv("MAX_INPUT_CHAR_LENGTH", "50000"))
 
     model_config = SettingsConfigDict(
         case_sensitive=True,
